@@ -2112,13 +2112,14 @@ impl Process {
     /// }
     /// ```
     pub fn tasks(&self) -> Option<&HashSet<Pid>> {
-        cfg_if! {
-            if #[cfg(all(
+        cfg_select! {
+            all(
                 any(target_os = "linux", target_os = "android"),
                 not(feature = "unknown-ci")
-            ))] {
+            ) => {
                 self.inner.tasks.as_ref()
-            } else {
+            }
+            _ => {
                 None
             }
         }
@@ -2141,15 +2142,12 @@ impl Process {
     /// }
     /// ```
     pub fn thread_kind(&self) -> Option<ThreadKind> {
-        cfg_if! {
-            if #[cfg(all(
+        cfg_select! {
+            all(
                 any(target_os = "linux", target_os = "android"),
                 not(feature = "unknown-ci")
-            ))] {
-                self.inner.thread_kind()
-            } else {
-                None
-            }
+            ) => self.inner.thread_kind(),
+            _ => None,
         }
     }
 
@@ -2281,8 +2279,8 @@ macro_rules! pid_decl {
     };
 }
 
-cfg_if! {
-    if #[cfg(all(
+cfg_select! {
+    all(
         not(feature = "unknown-ci"),
         any(
             target_os = "freebsd",
@@ -2292,11 +2290,12 @@ cfg_if! {
             target_os = "macos",
             target_os = "ios",
         )
-    ))] {
+    ) => {
         use libc::pid_t;
 
         pid_decl!(pid_t);
-    } else {
+    }
+    _ => {
         pid_decl!(usize);
     }
 }
@@ -2749,29 +2748,32 @@ impl RefreshKind {
 /// ```
 #[allow(clippy::unnecessary_wraps)]
 pub fn get_current_pid() -> Result<Pid, &'static str> {
-    cfg_if! {
-        if #[cfg(feature = "unknown-ci")] {
+    cfg_select! {
+        feature = "unknown-ci" => {
             fn inner() -> Result<Pid, &'static str> {
                 Err("Unknown platform (CI)")
             }
-        } else if #[cfg(any(
+        }
+        any(
             target_os = "freebsd",
             target_os = "netbsd",
             target_os = "linux",
             target_os = "android",
             target_os = "macos",
             target_os = "ios",
-        ))] {
+        ) => {
             fn inner() -> Result<Pid, &'static str> {
                 unsafe { Ok(Pid(libc::getpid())) }
             }
-        } else if #[cfg(windows)] {
+        }
+        windows => {
             fn inner() -> Result<Pid, &'static str> {
                 use windows::Win32::System::Threading::GetCurrentProcessId;
 
                 unsafe { Ok(Pid(GetCurrentProcessId() as _)) }
             }
-        } else {
+        }
+        _ => {
             fn inner() -> Result<Pid, &'static str> {
                 Err("Unknown platform")
             }
