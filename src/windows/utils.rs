@@ -19,8 +19,8 @@ pub(crate) unsafe fn to_utf8_str(p: windows::core::PWSTR) -> String {
     }
 }
 
-cfg_if! {
-    if #[cfg(any(feature = "disk", feature = "system"))] {
+cfg_select! {
+    any(feature = "disk", feature = "system") => {
         use windows::Win32::Foundation::{CloseHandle, HANDLE};
         use std::ops::Deref;
 
@@ -78,10 +78,11 @@ cfg_if! {
             }
         }
     }
+    _ => {}
 }
 
-cfg_if! {
-    if #[cfg(feature = "system")] {
+cfg_select! {
+    feature = "system" => {
         use windows::Win32::System::SystemInformation::{FIRMWARE_TABLE_PROVIDER, GetSystemFirmwareTable};
         use super::ffi::SMBIOSType;
 
@@ -160,4 +161,5 @@ cfg_if! {
             Some((info, values))
         }
     }
+    _ => {}
 }

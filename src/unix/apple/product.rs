@@ -13,24 +13,22 @@ impl ProductInner {
 
     pub(crate) fn name() -> Option<String> {
         Self::family().or_else(|| {
-            cfg_if! {
-                if #[cfg(all(target_os = "macos", not(feature = "apple-sandbox")))] {
+            cfg_select! {
+                all(target_os = "macos", not(feature = "apple-sandbox")) => {
                     get_io_platform_property("product-name")
-                } else {
-                    None
                 }
+                _ => None,
             }
         })
     }
 
     pub(crate) fn serial_number() -> Option<String> {
-        cfg_if! {
-            if #[cfg(all(target_os = "macos", not(feature = "apple-sandbox")))] {
+        cfg_select! {
+            all(target_os = "macos", not(feature = "apple-sandbox")) => {
                 use objc2_io_kit::kIOPlatformSerialNumberKey;
                 get_io_platform_property(unsafe { std::str::from_utf8_unchecked(kIOPlatformSerialNumberKey.to_bytes()) })
-            } else {
-                None
             }
+            _ => None,
         }
     }
 
@@ -39,23 +37,21 @@ impl ProductInner {
     }
 
     pub(crate) fn uuid() -> Option<String> {
-        cfg_if! {
-            if #[cfg(all(target_os = "macos", not(feature = "apple-sandbox")))] {
+        cfg_select! {
+            all(target_os = "macos", not(feature = "apple-sandbox")) => {
                 use objc2_io_kit::kIOPlatformUUIDKey;
                 get_io_platform_property(unsafe { std::str::from_utf8_unchecked(kIOPlatformUUIDKey.to_bytes()) })
-            } else {
-                None
             }
+            _ => None,
         }
     }
 
     pub(crate) fn version() -> Option<String> {
-        cfg_if! {
-            if #[cfg(all(target_os = "macos", not(feature = "apple-sandbox")))] {
+        cfg_select! {
+            all(target_os = "macos", not(feature = "apple-sandbox")) => {
                 get_io_platform_property("version")
-            } else {
-                None
             }
+            _ => None,
         }
     }
 

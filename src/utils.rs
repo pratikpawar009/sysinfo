@@ -1,11 +1,11 @@
 // Take a look at the license at the top of the repository in the LICENSE file.
 
-cfg_if! {
-    if #[cfg(all(
+cfg_select! {
+    all(
         feature = "multithread",
         not(feature = "unknown-ci"),
         not(all(target_os = "macos", feature = "apple-sandbox")),
-    ))] {
+    ) => {
         /// Converts the value into a parallel iterator if the `multithread` feature is enabled.
         /// Uses the `rayon::iter::IntoParallelIterator` trait.
         #[cfg(all(
@@ -32,7 +32,8 @@ cfg_if! {
         // {
         //     val.par_iter_mut()
         // }
-    } else {
+    }
+    _ => {
         /// Converts the value into a sequential iterator if the `multithread` feature is disabled.
         /// Uses the `std::iter::IntoIterator` trait.
         #[allow(dead_code)]

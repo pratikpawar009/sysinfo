@@ -11,42 +11,38 @@ impl MotherboardInner {
     }
 
     pub(crate) fn name(&self) -> Option<String> {
-        cfg_if! {
-            if #[cfg(all(target_os = "macos", not(feature = "apple-sandbox")))] {
+        cfg_select! {
+            all(target_os = "macos", not(feature = "apple-sandbox")) => {
                 get_io_platform_property("board-id")
-            } else {
-                None
             }
+            _ => None,
         }
     }
 
     pub(crate) fn vendor_name(&self) -> Option<String> {
-        cfg_if! {
-            if #[cfg(all(target_os = "macos", not(feature = "apple-sandbox")))] {
+        cfg_select! {
+            all(target_os = "macos", not(feature = "apple-sandbox")) => {
                 get_io_platform_property("manufacturer")
-            } else {
-                None
             }
+            _ => None,
         }
     }
 
     pub(crate) fn version(&self) -> Option<String> {
-        cfg_if! {
-            if #[cfg(all(target_os = "macos", not(feature = "apple-sandbox")))] {
+        cfg_select! {
+            all(target_os = "macos", not(feature = "apple-sandbox")) => {
                 get_io_platform_property("version")
-            } else {
-                None
             }
+            _ => None,
         }
     }
 
     pub(crate) fn serial_number(&self) -> Option<String> {
-        cfg_if! {
-            if #[cfg(all(target_os = "macos", not(feature = "apple-sandbox")))] {
+        cfg_select! {
+            all(target_os = "macos", not(feature = "apple-sandbox")) => {
                 get_io_platform_property("IOPlatformSerialNumber")
-            } else {
-                None
             }
+            _ => None,
         }
     }
 

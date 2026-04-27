@@ -2,9 +2,9 @@
 
 // Note: IOKit is only available on macOS up until very recent iOS versions: https://developer.apple.com/documentation/iokit
 
-cfg_if! {
+cfg_select! {
     // TODO(madsmtm): Expose this in `objc2-io-kit`.
-    if #[cfg(feature = "disk")] {
+    feature = "disk" => {
         #[allow(non_upper_case_globals)]
         pub const kIOPropertyDeviceCharacteristicsKey: &str = "Device Characteristics";
         #[allow(non_upper_case_globals)]
@@ -20,6 +20,7 @@ cfg_if! {
         #[allow(non_upper_case_globals)]
         pub const kIOBlockStorageDriverStatisticsBytesWrittenKey: &str = "Bytes (Write)";
     }
+    _ => {}
 }
 
 #[cfg(all(
