@@ -125,10 +125,10 @@ fn memory_limits<F>(
     usage_file: &str,
     mem_total: u64,
     base_limit: u64,
-    mut read_limit: F,
+    read_limit: F,
 ) -> Option<(u64, u64)>
 where
-    F: FnMut(&Path) -> u64,
+    F: Fn(&Path) -> u64,
 {
     let mem_cur = read_u64(&base.join(usage_file))?;
     let mut total_memory = mem_total;
