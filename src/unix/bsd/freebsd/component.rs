@@ -122,7 +122,7 @@ impl ComponentsInner {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComponentInner, ComponentsInner};
+    use super::ComponentInner;
     use crate::Component;
 
     #[test]
