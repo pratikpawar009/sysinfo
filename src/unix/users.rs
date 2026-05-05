@@ -1,21 +1,10 @@
 // Take a look at the license at the top of the repository in the LICENSE file.
 
 use crate::{
-    Group, User,
+    Group,
     common::{Gid, Uid},
 };
 use libc::{getgrgid_r, getgrouplist};
-
-#[cfg(not(target_os = "android"))]
-use libc::{endpwent, getpwent, setpwent};
-
-// See `https://github.com/rust-lang/libc/issues/3014`.
-#[cfg(target_os = "android")]
-unsafe extern "C" {
-    fn getpwent() -> *mut libc::passwd;
-    fn setpwent();
-    fn endpwent();
-}
 
 pub(crate) struct UserInner {
     pub(crate) uid: Uid,
@@ -125,61 +114,53 @@ pub(crate) unsafe fn get_user_groups(
     }
 }
 
-pub(crate) fn get_users(users: &mut Vec<User>) {
-    fn filter(shell: *const std::ffi::c_char, uid: u32) -> bool {
-        !endswith(shell, b"/false") && !endswith(shell, b"/uucico") && uid < 65536
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+pub(crate) fn get_users(users: &mut Vec<crate::User>) {
+    use std::io::{BufRead, BufReader};
+    use std::str::FromStr;
+
+    fn filter(shell: &str, uid: libc::uid_t) -> bool {
+        uid < 65536 && !shell.ends_with("/false") && !shell.ends_with("/uucico")
     }
 
     users.clear();
 
+    // We cannot use `getpwent`, `setpwent` and `endpwent` because they're not thread-safe. The
+    // `getpwent_r` equivalent is not thread-safe either. So we have to retrieve the users list
+    // ourselves...
+    let Ok(file) = std::fs::File::open("/etc/passwd") else {
+        sysinfo_debug!("failed to open `/etc/passwd`");
+        return;
+    };
     let mut users_map = std::collections::HashMap::with_capacity(10);
 
-    unsafe {
-        setpwent();
-        loop {
-            let pw = getpwent();
-            if pw.is_null() {
-                // The call was interrupted by a signal, retrying.
-                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                break;
-            }
-
-            if !filter((*pw).pw_shell, (*pw).pw_uid) {
-                // This is not a "real" or "local" user.
-                continue;
-            }
-            if let Some(name) = crate::unix::utils::cstr_to_rust((*pw).pw_name) {
-                if users_map.contains_key(&name) {
-                    continue;
-                }
-
-                let uid = (*pw).pw_uid;
-                let gid = (*pw).pw_gid;
-                users_map.insert(name, (Uid(uid), Gid(gid)));
-            }
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        let mut parts = line.split(':');
+        let Some(name) = parts.next() else { continue };
+        if users_map.contains_key(name) {
+            continue;
         }
-        endpwent();
+        parts.next(); // We skip the password field.
+        let Some(uid) = parts.next().and_then(|v| libc::uid_t::from_str(v).ok()) else {
+            continue;
+        };
+        let Some(gid) = parts.next().and_then(|v| libc::gid_t::from_str(v).ok()) else {
+            continue;
+        };
+        parts.next(); // We skip the "comment" field.
+        parts.next(); // We skip the directory field.
+        let Some(shell) = parts.next() else { continue };
+
+        if !filter(shell, uid) {
+            continue;
+        }
+        users_map.insert(name.into(), (Uid(uid), Gid(gid)));
     }
+
     for (name, (uid, gid)) in users_map {
-        users.push(User {
+        users.push(crate::User {
             inner: UserInner::new(uid, gid, name),
         });
-    }
-}
-
-fn endswith(s1: *const std::ffi::c_char, s2: &[u8]) -> bool {
-    if s1.is_null() {
-        return false;
-    }
-    unsafe {
-        let mut len = libc::strlen(s1) as isize - 1;
-        let mut i = s2.len() as isize - 1;
-        while len >= 0 && i >= 0 && *s1.offset(len) == s2[i as usize] as std::ffi::c_char {
-            i -= 1;
-            len -= 1;
-        }
-        i == -1
     }
 }

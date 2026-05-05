@@ -1,84 +1,118 @@
 // Take a look at the license at the top of the repository in the LICENSE file.
 
-// This was the OSX-based solution. It provides enough information, but what a mess!
-// pub fn get_users_list() -> Vec<User> {
-//     let mut users = Vec::new();
-//     let node_name = b"/Local/Default\0";
+use crate::unix::users::UserInner;
+use crate::{Gid, Uid, User};
 
-//     unsafe {
-//         let node_name = ffi::CFStringCreateWithCStringNoCopy(
-//             std::ptr::null_mut(),
-//             node_name.as_ptr() as *const c_char,
-//             ffi::kCFStringEncodingMacRoman,
-//             ffi::kCFAllocatorNull as *mut c_void,
-//         );
-//         let node_ref = ffi::ODNodeCreateWithName(
-//             ffi::kCFAllocatorDefault,
-//             ffi::kODSessionDefault,
-//             node_name,
-//             std::ptr::null_mut(),
-//         );
-//         let query = ffi::ODQueryCreateWithNode(
-//             ffi::kCFAllocatorDefault,
-//             node_ref,
-//             ffi::kODRecordTypeUsers as _, // kODRecordTypeGroups
-//             std::ptr::null(),
-//             0,
-//             std::ptr::null(),
-//             std::ptr::null(),
-//             0,
-//             std::ptr::null_mut(),
-//         );
-//         if query.is_null() {
-//             return users;
-//         }
-//         let results = ffi::ODQueryCopyResults(
-//             query,
-//             false as _,
-//             std::ptr::null_mut(),
-//         );
-//         let len = ffi::CFArrayGetCount(results);
-//         for i in 0..len {
-//             let name = match get_user_name(ffi::CFArrayGetValueAtIndex(results, i)) {
-//                 Some(n) => n,
-//                 None => continue,
-//             };
-//             users.push(User { name });
-//         }
+use libc::c_void;
+use objc2_core_foundation::{
+    CFArray, CFRetained, CFString, CFStringBuiltInEncodings, kCFAllocatorDefault, kCFAllocatorNull,
+};
+use objc2_open_directory::{
+    ODNodeRef, ODQueryRef, ODRecordRef, kODAttributeTypePrimaryGroupID, kODAttributeTypeRecordName,
+    kODAttributeTypeUniqueID, kODRecordTypeUsers, kODSessionDefault,
+};
+use std::ptr::null_mut;
+use std::str::FromStr;
 
-//         ffi::CFRelease(results as *const c_void);
-//         ffi::CFRelease(query as *const c_void);
-//         ffi::CFRelease(node_ref as *const c_void);
-//         ffi::CFRelease(node_name as *const c_void);
-//     }
-//     users.sort_unstable_by(|x, y| x.name.partial_cmp(&y.name).unwrap());
-//     return users;
-// }
+pub(crate) fn get_users(users: &mut Vec<User>) {
+    let node_name = b"/Local/Default\0";
+    users.clear();
 
-// fn get_user_name(result: *const c_void) -> Option<String> {
-//     let user_name = ffi::ODRecordGetRecordName(result as _);
-//     let ptr = ffi::CFStringGetCharactersPtr(user_name);
-//     String::from_utf16(&if ptr.is_null() {
-//         let len = ffi::CFStringGetLength(user_name); // It returns the len in UTF-16 code pairs.
-//         if len == 0 {
-//             continue;
-//         }
-//         let mut v = Vec::with_capacity(len as _);
-//         for x in 0..len {
-//             v.push(ffi::CFStringGetCharacterAtIndex(user_name, x));
-//         }
-//         v
-//     } else {
-//         let mut v: Vec<u16> = Vec::new();
-//         let mut x = 0;
-//         loop {
-//             let letter = *ptr.offset(x);
-//             if letter == 0 {
-//                 break;
-//             }
-//             v.push(letter);
-//             x += 1;
-//         }
-//         v
-//     }.ok()
-// }
+    unsafe {
+        let node_name = CFString::with_c_string_no_copy(
+            None,
+            node_name.as_ptr() as *const _,
+            CFStringBuiltInEncodings::EncodingMacRoman.0,
+            kCFAllocatorNull,
+        );
+        let node_ref = ODNodeRef::with_name(
+            kCFAllocatorDefault,
+            kODSessionDefault,
+            node_name.as_deref(),
+            null_mut(),
+        );
+        if node_ref.is_none() {
+            sysinfo_debug!("get_users failed: `ODNodeRef::with_name` returned nothing");
+            return;
+        }
+        let Some(attr_name) = kODAttributeTypeRecordName else {
+            sysinfo_debug!("Cannot get attribute for user name");
+            return;
+        };
+        let Some(attr_uid) = kODAttributeTypeUniqueID else {
+            sysinfo_debug!("Cannot get attribute for user id");
+            return;
+        };
+        let Some(attr_gid) = kODAttributeTypePrimaryGroupID else {
+            sysinfo_debug!("Cannot get attribute for user group id");
+            return;
+        };
+        #[allow(clippy::missing_transmute_annotations)]
+        let attributes: CFRetained<CFArray<CFString>> = CFArray::from_objects(&[
+            // NSString <-> CFString conversion is "toll-free bridging".
+            std::mem::transmute::<_, &CFString>(attr_name),
+            std::mem::transmute::<_, &CFString>(attr_uid),
+            std::mem::transmute::<_, &CFString>(attr_gid),
+        ]);
+        let Some(query) = ODQueryRef::with_node(
+            kCFAllocatorDefault,
+            node_ref.as_deref(),
+            // NSString <-> CFString conversion is "toll-free bridging".
+            kODRecordTypeUsers.map(|v| std::mem::transmute(v)),
+            None,
+            0,
+            None,
+            Some(&attributes),
+            0,
+            null_mut(),
+        ) else {
+            sysinfo_debug!("get_users failed: `ODQueryRef::with_node` returned nothing");
+            return;
+        };
+        let Some(results) = ODQueryRef::results(&query, false, null_mut()) else {
+            sysinfo_debug!("get_users failed: `ODQueryRef::results` returned nothing");
+            return;
+        };
+        let len = results.count();
+        for i in 0..len {
+            if let Some(user) = add_user(results.value_at_index(i)) {
+                users.push(user);
+            }
+        }
+    }
+}
+
+fn add_user(result: *const c_void) -> Option<User> {
+    if result.is_null() {
+        return None;
+    }
+    unsafe {
+        let result: &ODRecordRef = &*(result as *const _);
+
+        let values = result.values(kODAttributeTypeRecordName, null_mut())?;
+        let values = values.cast_unchecked::<CFString>();
+        let name = values.get(0).map(|v| v.to_string())?;
+
+        let values = result.values(kODAttributeTypeUniqueID, null_mut())?;
+        let values = values.cast_unchecked::<CFString>();
+        // FIXME: Would be nice to not have the `to_string` allocation... Maybe by iterating through
+        // the chars to generate the integer? Or eventually to find a way to have a `&str` out of
+        // the `CFString`.
+        let uid = values
+            .get(0)
+            .and_then(|v| libc::uid_t::from_str(&v.to_string()).ok())?;
+
+        let values = result.values(kODAttributeTypePrimaryGroupID, null_mut())?;
+        let values = values.cast_unchecked::<CFString>();
+        // FIXME: Would be nice to not have the `to_string` allocation... Maybe by iterating through
+        // the chars to generate the integer? Or eventually to find a way to have a `&str` out of
+        // the `CFString`.
+        let gid = values
+            .get(0)
+            .and_then(|v| libc::gid_t::from_str(&v.to_string()).ok())?;
+
+        Some(User {
+            inner: UserInner::new(Uid(uid), Gid(gid), name),
+        })
+    }
+}
