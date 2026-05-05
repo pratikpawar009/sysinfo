@@ -42,7 +42,7 @@ impl NetworksInner {
                 return;
             }
 
-            for (_, data) in self.interfaces.iter_mut() {
+            for data in self.interfaces.values_mut() {
                 data.inner.updated = false;
             }
 
