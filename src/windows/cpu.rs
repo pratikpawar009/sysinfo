@@ -152,7 +152,7 @@ unsafe impl Sync for InternalQuery {}
 impl Drop for InternalQuery {
     fn drop(&mut self) {
         unsafe {
-            for (_, counter) in self.data.iter() {
+            for counter in self.data.values() {
                 PdhRemoveCounter(*counter);
             }
 

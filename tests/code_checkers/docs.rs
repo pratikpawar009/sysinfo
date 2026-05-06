@@ -60,7 +60,7 @@ fn check_doc_comments_before(p: &Path, lines: &[&str], start: usize) -> bool {
                     &format!(
                         "Types should use common documentation by using `#[doc = include_str!(` \
                          and by putting the markdown file in the `md_doc` folder instead of `{}`",
-                        &lines[pos],
+                        lines[pos],
                     ),
                 );
                 return false;

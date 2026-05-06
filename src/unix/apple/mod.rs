@@ -64,7 +64,8 @@ cfg_select! {
         pub mod users;
 
         pub(crate) use crate::unix::groups::get_groups;
-        pub(crate) use crate::unix::users::{get_users, UserInner};
+        pub(crate) use crate::unix::users::UserInner;
+        pub(crate) use self::users::get_users;
     }
     _ => {}
 }
