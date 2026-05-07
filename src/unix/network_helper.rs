@@ -46,6 +46,15 @@ impl InterfaceAddress {
             _phantom: PhantomData,
         }
     }
+
+    /// Returns raw pointer to ifaddrs linked list.
+    ///
+    /// # Safety
+    /// Pointer is valid for lifetime of `InterfaceAddress`.
+    /// Do not call `freeifaddrs` on this pointer - handled by Drop.
+    pub(crate) fn as_raw_ptr(&self) -> *mut libc::ifaddrs {
+        self.buf
+    }
 }
 
 pub(crate) struct InterfaceAddressIterator<'a> {

@@ -1,0 +1,12 @@
+{
+  "feature_num": "001",
+  "feature_directory": "docs/001-optimize-getifaddrs",
+  "feature_dir": "docs/001-optimize-getifaddrs",
+  "branch_name": "001-optimize-getifaddrs",
+  "description": "Eliminate duplicate getifaddrs system calls in NetBSD network refresh",
+  "spec_file": "docs/001-optimize-getifaddrs/spec.md",
+  "plan_file": "docs/001-optimize-getifaddrs/plan.md",
+  "tasks_file": "docs/001-optimize-getifaddrs/tasks.md",
+  "created": "2026-05-07",
+  "updated": "2026-05-07"
+}
