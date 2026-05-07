@@ -1,3 +1,14 @@
+# 0.39.0
+
+ * Update minimum supported rust version to `1.95`.
+ * Add new `NetworkData::operational_state` API.
+ * Add new `Process::cgroup_limits` API (only returning data on Linux).
+ * All supported systems other than Windows: Improve performance of `Networks::refresh*`.
+ * All supported systems other than Windows: Fix soundness issue when retrieving users.
+ * Linux: Take into account parent cgroup memory limits.
+ * Linux: Fix panic when retrieving process information on `ESXi`.
+ * FreeBSD: Use the name of dataset as `name` for zfs disks.
+
 # 0.38.4
 
  * macOS: Unpin `objc2-*` crates version.
