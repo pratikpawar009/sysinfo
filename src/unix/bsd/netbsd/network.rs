@@ -42,6 +42,8 @@ impl NetworksInner {
                 true
             });
         }
+        // FIXME: Try to find a way to call `getifaddrs` only once. Currently it's called in
+        // `Self::refresh_interfaces` and in `refresh_networks_addresses`.
         refresh_networks_addresses(&mut self.interfaces);
     }
 
