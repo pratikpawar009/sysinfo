@@ -5,6 +5,7 @@
  * Add new `Process::cgroup_limits` API (only returning data on Linux).
  * All supported systems other than Windows: Improve performance of `Networks::refresh*`.
  * All supported systems other than Windows: Fix soundness issue when retrieving users.
+ * NetBSD: Optimize network refresh to call `getifaddrs` once instead of twice, reducing system call overhead by 50% (#1598).
  * Linux: Take into account parent cgroup memory limits.
  * Linux: Fix panic when retrieving process information on `ESXi`.
  * FreeBSD: Use the name of dataset as `name` for zfs disks.

@@ -29,8 +29,23 @@ impl NetworksInner {
     }
 
     pub(crate) fn refresh(&mut self, remove_not_listed_interfaces: bool) {
+        // Call getifaddrs ONCE and share the data.
+        //
+        // Previously, getifaddrs was called twice per refresh:
+        // 1. In refresh_interfaces() for collecting statistics (AF_LINK addresses)
+        // 2. In refresh_networks_addresses() for collecting IP/MAC addresses
+        //
+        // This optimization reduces system call overhead by 50% by calling getifaddrs
+        // once and sharing the result via InterfaceAddress wrapper (RAII pattern).
+        //
+        // See docs/001-optimize-getifaddrs/ for full design rationale.
+        let Some(ifaddrs) = crate::unix::network_helper::InterfaceAddress::new() else {
+            sysinfo_debug!("getifaddrs failed");
+            return;
+        };
+
         unsafe {
-            self.refresh_interfaces(true);
+            self.refresh_interfaces_from_ifaddrs(&ifaddrs, true);
         }
         if remove_not_listed_interfaces {
             // Remove interfaces which are gone.
@@ -42,19 +57,17 @@ impl NetworksInner {
                 true
             });
         }
-        // FIXME: Try to find a way to call `getifaddrs` only once. Currently it's called in
-        // `Self::refresh_interfaces` and in `refresh_networks_addresses`.
-        refresh_networks_addresses(&mut self.interfaces);
+        refresh_networks_addresses_from_ifaddrs(&mut self.interfaces, &ifaddrs);
     }
 
-    unsafe fn refresh_interfaces(&mut self, refresh_all: bool) {
+    unsafe fn refresh_interfaces_from_ifaddrs(
+        &mut self,
+        ifaddrs: &crate::unix::network_helper::InterfaceAddress,
+        refresh_all: bool,
+    ) {
         unsafe {
-            let Some(ifaddrs) = InterfaceAddressIterator::new() else {
-                sysinfo_debug!("getifaddrs failed");
-                return;
-            };
-
-            for ifa in ifaddrs {
+            // Use raw iterator over external ifaddrs data
+            for ifa in InterfaceAddressRawIterator::new(ifaddrs) {
                 let ifa = &*ifa;
                 if let Some(name) = std::ffi::CStr::from_ptr(ifa.ifa_name)
                     .to_str()
@@ -117,36 +130,35 @@ impl NetworksInner {
     }
 }
 
-struct InterfaceAddressIterator {
-    /// Pointer to the current `ifaddrs` struct.
+/// Iterator over AF_LINK addresses from external ifaddrs data (NetBSD-specific).
+/// This iterator filters for AF_LINK addresses to access interface statistics.
+struct InterfaceAddressRawIterator<'a> {
     ifap: *mut libc::ifaddrs,
-    /// Pointer to the first element in linked list.
-    buf: *mut libc::ifaddrs,
+    _phantom: std::marker::PhantomData<&'a crate::unix::network_helper::InterfaceAddress>,
 }
 
-impl InterfaceAddressIterator {
-    fn new() -> Option<Self> {
-        let mut ifap = std::ptr::null_mut();
-        if unsafe { retry_eintr!(libc::getifaddrs(&mut ifap)) } == 0 && !ifap.is_null() {
-            Some(Self { ifap, buf: ifap })
-        } else {
-            None
+impl<'a> InterfaceAddressRawIterator<'a> {
+    fn new(ifaddrs: &'a crate::unix::network_helper::InterfaceAddress) -> Self {
+        Self {
+            ifap: ifaddrs.as_raw_ptr(),
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl Iterator for InterfaceAddressIterator {
+impl<'a> Iterator for InterfaceAddressRawIterator<'a> {
     type Item = *mut libc::ifaddrs;
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
             while !self.ifap.is_null() {
-                // advance the pointer until a MAC address is found
+                // advance the pointer until an AF_LINK address is found
                 // Safety: `ifap` is already checked as non-null in the loop condition.
                 let ifap = self.ifap;
                 let r_ifap = &*ifap;
                 self.ifap = r_ifap.ifa_next;
 
+                // Filter: AF_LINK only, non-loopback
                 if r_ifap.ifa_addr.is_null()
                     || (*r_ifap.ifa_addr).sa_family as libc::c_int != libc::AF_LINK
                     || r_ifap.ifa_flags & libc::IFF_LOOPBACK as libc::c_uint != 0
@@ -160,10 +172,31 @@ impl Iterator for InterfaceAddressIterator {
     }
 }
 
-impl Drop for InterfaceAddressIterator {
-    fn drop(&mut self) {
-        unsafe {
-            libc::freeifaddrs(self.buf);
+/// NetBSD-specific: Populate IP/MAC addresses from external ifaddrs data.
+///
+/// This function accepts an external `InterfaceAddress` to avoid calling
+/// `getifaddrs` twice. See docs/001-optimize-getifaddrs/plan.md for rationale.
+pub(crate) fn refresh_networks_addresses_from_ifaddrs(
+    interfaces: &mut HashMap<String, NetworkData>,
+    ifaddrs: &crate::unix::network_helper::InterfaceAddress,
+) {
+    // Iterate over ALL address families (not just AF_LINK)
+    for (name, address_helper) in ifaddrs.iter() {
+        if let Some(interface) = interfaces.get_mut(&name) {
+            // Populate MAC address (from AF_LINK)
+            if let Some(mac) = address_helper.mac_addr() {
+                interface.inner.mac_addr = mac;
+            }
+
+            // Populate IP addresses (from AF_INET/AF_INET6)
+            if let Some(ip) = address_helper.ip() {
+                let prefix = address_helper.prefix();
+                let ip_network = crate::IpNetwork { addr: ip, prefix };
+
+                if !interface.inner.ip_networks.contains(&ip_network) {
+                    interface.inner.ip_networks.push(ip_network);
+                }
+            }
         }
     }
 }
