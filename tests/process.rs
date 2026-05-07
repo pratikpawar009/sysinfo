@@ -1124,6 +1124,9 @@ fn test_tasks() {
             ProcessRefreshKind::nothing(),
         );
 
+        // Try to remove flakyness a bit.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
         let mut system_new = System::new_with_specifics(RefreshKind::nothing());
         system_new.refresh_processes_specifics(
             ProcessesToUpdate::All,
