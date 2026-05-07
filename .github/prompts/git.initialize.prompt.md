@@ -1,0 +1,3 @@
+---
+agent: git.initialize
+---
