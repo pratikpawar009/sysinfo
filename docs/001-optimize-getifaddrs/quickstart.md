@@ -1,513 +1,402 @@
-# QuickStart Guide: Testing & Verifying Optimization
+# Developer Quickstart: Optimize getifaddrs System Call
 
 **Feature**: 001 - Optimize getifaddrs System Call  
-**Audience**: Developers, QA, Reviewers  
-**Platform**: NetBSD (primary), Linux/FreeBSD (regression testing)
+**Last Updated**: 2026-05-07
+
+---
+
+## Overview
+
+This guide helps developers understand, test, and validate the getifaddrs optimization in the NetBSD network interface implementation.
+
+---
+
+## Quick Summary
+
+**What Changed**: NetBSD network refresh now calls `getifaddrs` once instead of twice per refresh operation.
+
+**Why It Matters**: Reduces system call overhead by ~50%, improves performance for applications polling network state.
+
+**Impact**: NetBSD platform only, no API changes, all existing code continues to work.
 
 ---
 
 ## Prerequisites
 
-### Required
-- Rust toolchain 1.95+ (`rustup default stable`)
-- NetBSD 9.x or 10.x (for primary testing)
-- `cargo` and `cargo-criterion` installed
+### Development Environment
+- Rust 1.95 or later
+- NetBSD system (physical or VM) for platform-specific testing
+- Optional: `strace` or `ktrace` for syscall tracing
 
-### Optional
-- `ktrace`/`kdump` (NetBSD system call tracer)
-- `valgrind` (memory leak detection, if available on NetBSD)
-- `gh` CLI (for PR creation)
+### Dependencies
+```toml
+[dependencies]
+libc = "0.2"  # Already in Cargo.toml
+```
 
 ---
 
-## Quick Verification (5 minutes)
+## Build & Test
 
-### Step 1: Build and Test
-
+### Basic Build
 ```bash
-# Clone and checkout feature branch
-git clone https://github.com/GuillaumeGomez/sysinfo.git
-cd sysinfo
-git checkout feature/test_changes
+# Build the crate
+cargo build
 
-# Build
-cargo build --release
-
-# Run tests
-cargo test --lib --test network
+# Build for NetBSD specifically (if cross-compiling)
+cargo build --target x86_64-unknown-netbsd
 ```
 
-**Expected**: All 83 tests pass (44 lib + 39 integration)
-
-### Step 2: Run Simple Example
-
+### Run Tests
 ```bash
-# Build example
-cargo build --example simple
+# Run all tests
+cargo test
 
-# Run  
-./target/debug/examples/simple
+# Run network tests specifically
+cargo test --test network
+
+# Run with verbose output
+cargo test --test network -- --nocapture
 ```
 
-**Expected**: Output shows network interfaces with statistics
+### Platform-Specific Testing
+```bash
+# On NetBSD system
+cargo test --features network
+
+# With debugging output
+RUST_LOG=debug cargo test --test network
+```
 
 ---
 
-## System Call Verification (NetBSD)
+## Code Walkthrough
 
-### Using ktrace to Verify Single getifaddrs Call
+### Key Files Modified
 
-**Purpose**: Prove that `getifaddrs` is called exactly once per refresh (not twice).
+#### 1. `src/unix/bsd/netbsd/network.rs`
 
-#### Step 1: Build Test Program
-
-```bash
-cargo build --release --example simple
-```
-
-#### Step 2: Trace System Calls
-
-```bash
-# Run with syscall tracing
-ktrace -t c -f ktrace.out ./target/release/examples/simple
-
-# Alternative: trace specific syscalls only
-ktrace -t c -f ktrace.out -i ./target/release/examples/simple
-```
-
-#### Step 3: Analyze Trace
-
-```bash
-# Extract getifaddrs calls
-kdump -f ktrace.out | grep 'getifaddrs'
-
-# Count occurrences
-kdump -f ktrace.out | grep -c 'getifaddrs'
-```
-
-**Expected Output (BEFORE optimization)**:
-```
- 18937 simple   CALL  getifaddrs(0x7f7fffd00)
- 18937 simple   RET   getifaddrs 0
- 18937 simple   CALL  getifaddrs(0x7f7fffd08)  # DUPLICATE!
- 18937 simple   RET   getifaddrs 0
- 18937 simple   CALL  freeifaddrs(0x7f7fff000)
- 18937 simple   CALL  freeifaddrs(0x7f7fff008)  # DUPLICATE!
-```
-
-**Expected Output (AFTER optimization)**:
-```
- 18937 simple   CALL  getifaddrs(0x7f7fffd00)
- 18937 simple   RET   getifaddrs 0
- 18937 simple   CALL  freeifaddrs(0x7f7fff000)
-```
-
-**Verification**:
-```bash
-# Should output: 1
-kdump -f ktrace.out | grep -c 'CALL.*getifaddrs'
-```
-
-✅ **PASS**: Exactly 1 `getifaddrs` call  
-❌ **FAIL**: 2 or more calls (optimization not working)
-
----
-
-## Performance Benchmarking
-
-### Using Criterion
-
-#### Step 1: Create Benchmark (if not exists)
-
-File: `benches/network_refresh.rs`
+**Main Change**: `refresh()` method
 
 ```rust
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use sysinfo::Networks;
+pub(crate) fn refresh(&mut self, remove_not_listed_interfaces: bool) {
+    // NEW: Call getifaddrs ONCE
+    let Some(ifaddrs) = crate::unix::network_helper::InterfaceAddress::new() else {
+        sysinfo_debug!("getifaddrs failed");
+        return;
+    };
 
-fn network_refresh_benchmark(c: &mut Criterion) {
-    c.bench_function("network_refresh", |b| {
-        let mut networks = Networks::new();
-        b.iter(|| {
-            networks.refresh(black_box(true));
-        });
-    });
+    // Use the single result for both operations
+    unsafe {
+        self.refresh_interfaces_from_ifaddrs(&ifaddrs, true);
+    }
+    
+    // ... interface removal logic ...
+    
+    // Reuse the same ifaddrs result
+    refresh_networks_addresses_from_ifaddrs(&mut self.interfaces, &ifaddrs);
+    
+    // ifaddrs automatically freed here (Drop trait)
+}
+```
+
+**Before** (pseudocode):
+```rust
+fn refresh() {
+    let ifaddrs1 = getifaddrs();  // System call #1
+    refresh_interfaces(ifaddrs1);
+    freeifaddrs(ifaddrs1);
+    
+    let ifaddrs2 = getifaddrs();  // System call #2  
+    refresh_networks_addresses(ifaddrs2);
+    freeifaddrs(ifaddrs2);
+}
+```
+
+**After**:
+```rust
+fn refresh() {
+    let ifaddrs = InterfaceAddress::new();  // System call (once)
+    refresh_interfaces_from_ifaddrs(&ifaddrs);
+    refresh_networks_addresses_from_ifaddrs(&ifaddrs);
+    // Automatic cleanup via Drop
+}
+```
+
+#### 2. `src/unix/network_helper.rs`
+
+**RAII Wrapper** (already existed, now used more efficiently):
+
+```rust
+pub(crate) struct InterfaceAddress {
+    buf: *mut libc::ifaddrs,  // Raw C pointer
 }
 
-fn network_refresh_with_list_benchmark(c: &mut Criterion) {
-    c.bench_function("network_refresh_with_list", |b| {
-        let mut networks = Networks::new();
-        networks.refresh(true);
-        b.iter(|| {
-            networks.refresh(black_box(false));
-            let _ = networks.iter().count();
-        });
-    });
+impl InterfaceAddress {
+    pub(crate) fn new() -> Option<Self> {
+        let mut ifap = null_mut();
+        if unsafe { libc::getifaddrs(&mut ifap) } == 0 && !ifap.is_null() {
+            Some(Self { buf: ifap })
+        } else {
+            None  // System call failed
+        }
+    }
+    
+    pub(crate) fn as_raw_ptr(&self) -> *mut libc::ifaddrs {
+        self.buf  // For platform-specific iteration
+    }
 }
 
-criterion_group!(benches, network_refresh_benchmark, network_refresh_with_list_benchmark);
-criterion_main!(benches);
+impl Drop for InterfaceAddress {
+    fn drop(&mut self) {
+        unsafe {
+            libc::freeifaddrs(self.buf);  // Automatic cleanup!
+        }
+    }
+}
 ```
 
-#### Step 2: Baseline (Before Optimization)
-
-```bash
-# Switch to main branch
-git checkout main
-
-# Run benchmark and save baseline
-cargo bench --bench network_refresh -- --save-baseline before
-```
-
-#### Step 3: Compare (After Optimization)
-
-```bash
-# Switch to feature branch
-git checkout feature/test_changes
-
-# Run and compare to baseline  
-cargo bench --bench network_refresh -- --baseline before
-```
-
-**Expected Output**:
-```
-network_refresh         time:   [42.5 µs 45.8 µs 49.2 µs]
-                        change: [-52.1% -48.3% -44.7%] (improvement)
-                        Performance has improved.
-
-network_refresh_with_list
-                        time:   [38.2 µs 41.5 µs 45.1 µs]
-                        change: [-51.8% -47.9% -43.2%] (improvement)
-```
-
-**Interpretation**:
-- **40-50% improvement** ✅ Optimization successful  
-- **<30% improvement** ⚠ Investigate (may need more iterations)
-- **No improvement** ❌ Optimization not working
+**Key Point**: When `ifaddrs` goes out of scope, `Drop::drop()` automatically calls `freeifaddrs`. No manual memory management needed.
 
 ---
 
-## Functional Testing
+## Validation
 
-### Test 1: Interface Enumeration
+### 1. Functional Testing
 
+**Verify Network Information Still Works**:
 ```bash
-cargo run --example simple 2>&1 | grep -A 5 "interface:"
+cargo test --test network -- test_networks
 ```
 
-**Expected**: All network interfaces listed with names
+**Expected**: All tests pass, network information identical to before.
 
-**Verify**:
-- Physical interfaces (e.g., `bge0`, `wm0`)
-- Virtual interfaces (e.g., `bridge0`, `vlan0`)
-- Loopback excluded or shown separately
+### 2. System Call Tracing
 
-### Test 2: Statistics Accuracy
+**On NetBSD with ktrace**:
+```bash
+# Start tracing
+ktrace -t c ./target/debug/examples/simple
 
+# View system calls
+kdump | grep getifaddrs
+```
+
+**Expected Output** (per refresh):
+```
+CALL  getifaddrs(0x7f7fff5ff8)
+RET   getifaddrs 0
+```
+
+You should see **one** `getifaddrs` call per refresh, not two.
+
+**On Linux with strace** (for comparison, different syscalls):
+```bash
+strace -e trace=socket,recvmsg ./target/debug/examples/simple 2>&1 | grep -A5 NETLINK
+```
+
+### 3. Performance Benchmarking
+
+**Run Benchmark**:
+```bash
+cargo bench --bench network_refresh
+```
+
+**Expected**: ~30-50% improvement in network refresh time (varies by system).
+
+**Manual Benchmark**:
 ```rust
-// Create test program: verify_stats.rs
+use std::time::Instant;
 use sysinfo::Networks;
 
 fn main() {
     let mut networks = Networks::new();
-    networks.refresh(true);
     
-    for (name, data) in networks.iter() {
-        println!("{}: rx={} bytes, tx={} bytes",
-            name,
-            data.received(),
-            data.transmitted()
-        );
-        
-        assert!(data.received() >= 0, "RX must be non-negative");
-        assert!(data.transmitted() >= 0, "TX must be non-negative");
+    let start = Instant::now();
+    for _ in 0..1000 {
+        networks.refresh();
     }
+    let elapsed = start.elapsed();
     
-    println!("✅ Statistics validation passed");
+    println!("1000 refreshes: {:?}", elapsed);
+    println!("Per refresh: {:?}", elapsed / 1000);
 }
 ```
 
+### 4. Memory Leak Detection
+
+**With Valgrind** (if available on NetBSD):
 ```bash
-rustc --edition 2021 verify_stats.rs -L target/release/deps
-./verify_stats
-```
-
-**Expected**: Non-zero bytes for active interfaces, no panics
-
-### Test 3: MAC Address Retrieval
-
-```bash
-cargo test --test network -- --test-threads=1 --nocapture test_mac_address
-```
-
-**Expected**: Valid MAC addresses for physical interfaces
-
-**Manual Verification**:
-```bash
-# Compare with ifconfig output
-ifconfig | grep -A 1 "^[a-z]" | grep "address:"
-```
-
-### Test 4: IP Address Population
-
-```bash
-cargo test --test network -- --test-threads=1 test_addresses
-```
-
-**Expected**: 
-- IPv4 addresses match `ifconfig`
-- IPv6 addresses match `ifconfig`
-- Addresses correctly associated with interface names
-
----
-
-## Regression Testing (Other Platforms)
-
-### Linux Regression Check
-
-```bash
-# On Linux system
-cargo build --release
-cargo test --lib --test network
-
-# Ensure no NetBSD-specific code affects Linux
-grep -r "target_os.*netbsd" src/unix/linux/
-```
-
-**Expected**: Clean build, all tests pass, no NetBSD symbols
-
-### FreeBSD Regression Check
-
-```bash
-# On FreeBSD system
-cargo build --release
-cargo test --lib --test network
-```
-
-**Expected**: Clean build, all tests pass (FreeBSD uses different code path)
-
----
-
-## Memory Safety Verification
-
-### Using Valgrind (if available)
-
-```bash
-# Build with debug symbols
-cargo build --example simple
-
-# Run with leak detection
-valgrind --leak-check=full \
-         --show-leak-kinds=all \
-         --track-origins=yes \
-         ./target/debug/examples/simple
-```
-
-**Expected**:
-```
-==12345== HEAP SUMMARY:
-==12345==     in use at exit: 0 bytes in 0 blocks
-==12345==   total heap usage: X allocs, X frees, Y bytes allocated
-==12345== 
-==12345== All heap blocks were freed -- no leaks are possible
-```
-
-✅ **PASS**: "All heap blocks were freed"  
-❌ **FAIL**: Any "definitely lost" or "indirectly lost" blocks
-
-### Using Rust Miri
-
-```bash
-# Install miri
-rustup +nightly component add miri
-
-# Run network tests under miri
-cargo +nightly miri test --lib network
-```
-
-**Expected**: No undefined behavior detected
-
-**Note**: Miri may not support all libc calls; focus on Rust-level safety.
-
----
-
-## Test Matrix
-
-| Test | Platform | Tool | Time | Priority |
-|------|----------|------|------|----------|
-| **Compilation** | All | cargo | 2 min | HIGH |
-| **Unit Tests** | All | cargo test | 3 min | HIGH |
-| **Integration Tests** | All | cargo test | 5 min | HIGH |
-| **System Call Trace** | NetBSD | ktrace | 2 min | HIGH |
-| **Performance Bench** | NetBSD | criterion | 10 min | MEDIUM |
-| **Memory Leak Check** | NetBSD | valgrind | 5 min | MEDIUM |
-| **Linux Regression** | Linux | cargo test | 3 min | MEDIUM |
-| **FreeBSD Regression** | FreeBSD | cargo test | 3 min | LOW |
-
-**Total Testing Time**: ~30 minutes (comprehensive)  
-**Minimal Verification**: ~10 minutes (compile + tests + ktrace)
-
----
-
-## Troubleshooting
-
-### Issue: ktrace shows 2 getifaddrs calls
-
-**Symptom**: `kdump | grep -c getifaddrs` outputs `2`
-
-**Diagnosis**:
-1. Verify you're testing the feature branch:
-   ```bash
-   git branch --show-current  # Should show: feature/test_changes
-   ```
-
-2. Check build is using new code:
-   ```bash
-   cargo clean
-   cargo build --release --example simple
-   ```
-
-3. Inspect network.rs implementation:
-   ```bash
-   grep -A 5 "fn refresh" src/unix/bsd/netbsd/network.rs
-   ```
-
-**Expected**: Should see `InterfaceAddress::new()` called once in `refresh()`
-
----
-
-### Issue: Performance not improved
-
-**Symptom**: Benchmark shows <30% improvement
-
-**Diagnosis**:
-
-1. **Check baseline was saved**:
-   ```bash
-   ls -la target/criterion/network_refresh/before/
-   ```
-
-2. **Run on quiet system**:
-   - Close other applications
-   - Disable unnecessary services
-   - Run multiple times and average
-
-3. **Verify optimization enabled**:
-   ```bash
-   cargo bench --release  # Ensure --release flag
-   ```
-
-4. **Check system specs**:
-   - Fast syscalls may show less dramatic improvement
-   - Run on system with 10+ network interfaces for better measurement
-
----
-
-### Issue: Tests failing after changes
-
-**Symptom**: `cargo test` reports failures
-
-**Diagnosis**:
-
-1. **Identify failing test**:
-   ```bash
-   cargo test -- --nocapture 2>&1 | grep -A 10 "FAILED"
-   ```
-
-2. **Run single test**:
-   ```bash
-   cargo test --test network test_<failing_test> -- --exact --nocapture
-   ```
-
-3. **Compare with main branch**:
-   ```bash
-   git stash
-   cargo test--test network test_<failing_test>
-   git stash pop
-   ```
-
-4. **Check for NetBSD-specific issues**:
-   - AF_LINK filtering logic
-   - Interface name parsing
-   - Statistics extraction from `if_data`
-
----
-
-## Acceptance Checklist
-
-Before merging, verify all items:
-
-### Functional
-- [ ] All 83 tests pass on NetBSD
-- [ ] Network interfaces correctly enumerated
-- [ ] MAC addresses correct (compare with `ifconfig`)
-- [ ] IPv4/IPv6 addresses correct
-- [ ] Statistics (rx/tx bytes, packets, errors) accurate
-- [ ] Loopback filtering works
-- [ ] Hot-plug interfaces detected (if testing available)
-
-### Performance
-- [ ] ktrace shows exactly 1 `getifaddrs` call
-- [ ] Benchmark shows ≥40% improvement
-- [ ] No memory leaks (valgrind clean)
-- [ ] No performance regression on other platforms
-
-### Code Quality
-- [ ] Compiles without warnings (`cargo build --release`)
-- [ ] No new clippy lints (`cargo clippy`)
-- [ ] FIXME comment removed (network.rs lines 45-46)
-- [ ] Code documented with implementation notes
-
-### Regression
-- [ ] Linux builds and tests pass
-- [ ] FreeBSD builds and tests pass
-- [ ] Public API unchanged (no semver breaks)
-
----
-
-## Quick Reference Commands
-
-```bash
-# Full test suite
-cargo test --all
-
-# NetBSD-specific test
-cargo test --test network
-
-# System call trace
-ktrace -t c ./target/release/examples/simple && kdump | grep getifaddrs
-
-# Performance benchmark
-cargo bench --bench network_refresh
-
-# Memory check
 valgrind --leak-check=full ./target/debug/examples/simple
-
-# Build for release
-cargo build --release
-
-# Check code quality
-cargo clippy -- -D warnings
 ```
+
+**Expected**: No leaks reported from `getifaddrs`/`freeifaddrs`.
+
+---
+
+## Common Issues & Troubleshooting
+
+### Issue: Tests Fail on Non-NetBSD Platforms
+
+**Symptom**: Test failures on Linux/macOS/Windows  
+**Cause**: This optimization is NetBSD-specific  
+**Solution**: Tests should pass on all platforms. If they fail on NetBSD specifically, check:
+1. NetBSD version compatibility
+2. Network interface availability in test environment
+3. Permissions (some network info requires root)
+
+### Issue: Memory Leaks Detected
+
+**Symptom**: Valgrind reports leaked `ifaddrs` memory  
+**Cause**: `Drop` trait not being called (very unlikely)  
+**Debug**:
+1. Check if `InterfaceAddress` is being `mem::forget()`'ed (shouldn't be)
+2. Verify `Drop::drop()` is implemented correctly
+3. Check for early `return` paths that skip cleanup (RAII prevents this)
+
+### Issue: Network Info Missing or Incorrect
+
+**Symptom**: Missing IP addresses, incorrect MAC, etc.  
+**Cause**: Iterator not processing all address families  
+**Debug**:
+1. Check `refresh_networks_addresses_from_ifaddrs` processes AF_INET/AF_INET6
+2. Verify `InterfaceAddressRawIterator` filters correctly (AF_LINK only)
+3. Ensure both functions receive same `ifaddrs` reference
+
+---
+
+## Modifying the Code
+
+### Adding Debug Output
+
+```rust
+let Some(ifaddrs) = InterfaceAddress::new() else {
+    eprintln!("DEBUG: getifaddrs failed");
+    return;
+};
+
+eprintln!("DEBUG: Got ifaddrs, calling refresh_interfaces_from_ifaddrs");
+unsafe {
+    self.refresh_interfaces_from_ifaddrs(&ifaddrs, true);
+}
+
+eprintln!("DEBUG: Calling refresh_networks_addresses_from_ifaddrs");
+refresh_networks_addresses_from_ifaddrs(&mut self.interfaces, &ifaddrs);
+
+eprintln!("DEBUG: Refresh complete, ifaddrs will be freed now");
+// Drop happens here
+```
+
+### Adding Syscall Counting
+
+```rust
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static GETIFADDRS_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+impl InterfaceAddress {
+    pub(crate) fn new() -> Option<Self> {
+        GETIFADDRS_CALLS.fetch_add(1, Ordering::Relaxed);
+        // ... rest of implementation
+    }
+}
+
+// In tests:
+assert_eq!(GETIFADDRS_CALLS.load(Ordering::Relaxed), 1);
+```
+
+---
+
+## Testing Checklist
+
+Before submitting changes:
+
+- [ ] `cargo build` succeeds
+- [ ] `cargo test` passes (all platforms)
+- [ ] `cargo test --test network` passes on NetBSD
+- [ ] `cargo clippy` reports no warnings
+- [ ] `cargo fmt` applied
+- [ ] System call tracing shows one `getifaddrs` per refresh
+- [ ] No memory leaks detected (if Valgrind available)
+- [ ] Performance benchmark shows improvement
+- [ ] Documentation comments updated
+
+---
+
+## Performance Expectations
+
+### Typical Results
+
+| Scenario | Before | After | Improvement |
+|----------|--------|-------|-------------|
+| Single refresh (5 interfaces) | ~10µs | ~5µs | ~50% |
+| 1000 refreshes | ~10ms | ~5ms | ~50% |
+| High-frequency monitoring (100Hz) | 1ms/sec | 0.5ms/sec | ~50% |
+
+### Variables Affecting Performance
+
+1. **Interface Count**: More interfaces = more data to process
+2. **Address Count**: More IPs per interface = more iteration
+3. **System Load**: Heavy system load increases syscall overhead
+4. **NetBSD Version**: Kernel optimizations vary by version
+
+---
+
+## Further Reading
+
+- [Feature Specification](./spec.md) - Requirements and goals
+- [Implementation Plan](./plan.md) - Detailed technical design
+- [Research Notes](./research.md) - Background and alternatives considered
+- [Data Model](./data-model.md) - Entity relationships and data flow
+- [NetBSD getifaddrs(3) man page](https://man.netbsd.org/getifaddrs.3)
+- [Issue #1598](https://github.com/GuillaumeGomez/sysinfo/issues/1598) - Original bug report
 
 ---
 
 ## Getting Help
 
-**Documentation**:
-- [spec.md](spec.md) - Feature requirements
-- [plan.md](plan.md) - Implementation design  
-- [research.md](research.md) - Technical findings
-
-**Issue Tracking**:
-- GitHub Issue #1598
-
-**Related Files**:
-- `src/unix/bsd/netbsd/network.rs` - Implementation
-- `src/unix/network_helper.rs` - InterfaceAddress helper
-- `benches/network_refresh.rs` - Performance tests
+- **Questions**: Open a discussion on GitHub
+- **Bugs**: File an issue with:
+  - Platform (NetBSD version)
+  - Rust version
+  - Steps to reproduce
+  - Expected vs actual behavior
+- **Feature Requests**: Related optimizations for other platforms
 
 ---
 
-**Status**: Ready for Testing ✅  
-**Est. Testing Time**: 30 minutes (full), 10 minutes (core)
+## Quick Reference
+
+### Key Functions
+
+| Function | Purpose | System Calls |
+|----------|---------|-------------|
+| `InterfaceAddress::new()` | Call getifaddrs once | 1 |
+| `refresh_interfaces_from_ifaddrs()` | Collect AF_LINK statistics | 0 (uses passed data) |
+| `refresh_networks_addresses_from_ifaddrs()` | Collect IP/MAC addresses | 0 (uses passed data) |
+| `Drop::drop()` | Free memory | 0 (cleanup) |
+
+### Before vs After
+
+```rust
+// Before (conceptual)
+let data1 = getifaddrs();  // syscall
+process_statistics(data1);
+free(data1);
+
+let data2 = getifaddrs();  // syscall  
+process_addresses(data2);
+free(data2);
+
+// After (actual)
+let data = InterfaceAddress::new();  // syscall
+process_statistics(&data);           // reuse
+process_addresses(&data);            // reuse
+// data.drop() called automatically  // cleanup
+```
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: 2026-05-07  
+**Maintainer**: sysinfo contributors

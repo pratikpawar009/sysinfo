@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use sysinfo::Networks;
 
 fn network_refresh_benchmark(c: &mut Criterion) {
@@ -21,5 +21,9 @@ fn network_refresh_with_list_benchmark(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, network_refresh_benchmark, network_refresh_with_list_benchmark);
+criterion_group!(
+    benches,
+    network_refresh_benchmark,
+    network_refresh_with_list_benchmark
+);
 criterion_main!(benches);

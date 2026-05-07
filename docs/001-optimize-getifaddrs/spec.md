@@ -1,309 +1,227 @@
 # Feature Specification: Optimize getifaddrs System Call
 
-**Feature ID**: 001  
+**Version**: 1.0  
 **Status**: Draft  
 **Created**: 2026-05-07  
-**Last Updated**: 2026-05-07  
-**Owner**: Development Team  
-**Related Issue**: #1598
+**Last Updated**: 2026-05-07
+
+---
 
 ## Overview
 
-Optimize the NetBSD network interface refresh implementation to eliminate redundant `getifaddrs` system calls. Currently, the `refresh()` method calls `getifaddrs` twice - once in `refresh_interfaces()` and again in `refresh_networks_addresses()` - causing unnecessary performance overhead. This feature refactors the code to call `getifaddrs` only once and reuse the result across both operations.
+Eliminate redundant `getifaddrs` system calls in the NetBSD network interface refresh implementation to improve performance and reduce system call overhead during network state updates.
+
+---
 
 ## Problem Statement
 
-The current implementation in `src/unix/bsd/netbsd/network.rs` has a documented FIXME (line 45-46) indicating that `getifaddrs` is called twice:
+The current NetBSD network refresh implementation in `unix::networks::refresh_networks_addresses` calls the `getifaddrs` system call twice during a single refresh operation:
+1. Once to retrieve network interface information
+2. Again to retrieve network address information
 
-1. First call in `refresh_interfaces()` via `InterfaceAddressIterator::new()`
-2. Second call in `refresh_networks_addresses()` 
+System calls are expensive operations that context-switch into kernel mode. Calling `getifaddrs` twice when the data could be retrieved and reused from a single call creates unnecessary performance overhead, especially in applications that poll network state frequently.
 
-Each `getifaddrs` call:
-- Is a system call with kernel transition overhead
-- Allocates memory for the interface list
-- Traverses the kernel's network interface data structures
-- Creates a linked list snapshot of all network interfaces
-
-Calling it twice per refresh cycle:
-- **Doubles system call overhead** (kernel context switches)
-- **Doubles memory allocation/deallocation**
-- **Doubles CPU time** spent traversing kernel structures
-- **Impacts battery life** on mobile/embedded NetBSD systems
-- **Degrades performance** when called frequently (monitoring, dashboards)
+---
 
 ## Goals
 
-### Primary Goals
-- **FR-001**: Reduce `getifaddrs` calls from 2 to 1 per `refresh()` invocation
-- **FR-002**: Maintain existing public API and behavior (no breaking changes)
-- **FR-003**: Preserve all existing functionality (statistics, addresses, MAC addresses)
-- **FR-004**: Ensure proper memory management (no leaks, correct cleanup)
+**Primary Goals:**
+- Reduce `getifaddrs` system calls from 2 to 1 per network refresh operation
+- Maintain exact same public API behavior and functionality
+- Improve network refresh performance by eliminating redundant system calls
 
-### Success Criteria
-- **SC-001**: System call count verification: `ktrace` shows exactly 1 `getifaddrs` call per refresh
-- **SC-002**: Performance improvement: Measurable reduction in refresh() execution time
-- **SC-003**: All existing tests pass without modification
-- **SC-004**: No regressions in memory usage or correctness
+**Secondary Goals:**
+- Establish a pattern for optimizing system calls across other platform implementations
+- Document the optimization for future platform contributors
 
-## User Stories
+**Non-Goals:**
+- Changing the public API of the Networks module
+- Caching network state across multiple refresh calls (separate feature)
+- Modifying network refresh behavior on other platforms (Linux, macOS, Windows, etc.)
 
-### US-001: System Monitoring Application Developer
-**As a** developer of a system monitoring application  
-**I want** network interface refresh operations to be efficient  
-**So that** I can poll network statistics frequently without significant CPU overhead
+---
 
-**Acceptance Criteria**:
-- Refresh operations complete in <50% of current time
-- CPU usage per refresh reduced by ~40-50%
-- Memory allocations reduced by half
+## User Scenarios
 
-### US-002: NetBSD System Administrator
-**As a** NetBSD system administrator  
-**I want** accurate network statistics with minimal performance impact  
-**So that** monitoring doesn't interfere with production workloads
+### Scenario 1: Application Polls Network State
 
-**Acceptance Criteria**:
-- All network statistics remain accurate
-- Interface operational states correctly reported
-- MAC addresses properly retrieved
-- IP addresses correctly populated
+**Actor**: Application developer using sysinfo crate
+
+**Context**: An application monitors network interface status every second to detect connectivity changes (e.g., VPN connect/disconnect, network adapter enable/disable)
+
+**Steps**:
+1. Application calls `networks.refresh()` or `networks.refresh_list()` repeatedly
+2. sysinfo internally retrieves current network interface addresses
+3. Application receives updated network state
+4. Process repeats on timer/polling interval
+
+**Expected Outcome**: Network state updates complete faster with reduced CPU overhead and fewer context switches to kernel mode
+
+---
+
+### Scenario 2: System Monitor Dashboard
+
+**Actor**: System monitoring application
+
+**Context**: A dashboard displays real-time system statistics including network interface status and addresses across multiple monitored hosts
+
+**Steps**:
+1. Monitor calls sysinfo network refresh on each poll cycle
+2. Network interface data is collected along with CPU, memory, disk stats
+3. Dashboard updates display with current network state
+4. Polling continues at configured interval (1-5 seconds typical)
+
+**Expected Outcome**: Lower system overhead for network monitoring, allowing more frequent polling or monitoring more network interfaces without performance degradation
+
+---
 
 ## Functional Requirements
 
-### FR-001: Single getifaddrs Call
-**Priority**: High  
-**Description**: Refactor `refresh()` to call `getifaddrs` exactly once
+### Core Requirements
 
-**Details**:
-- Move `getifaddrs` call to `refresh()` method
-- Pass the result to both `refresh_interfaces()` and `refresh_networks_addresses()`
-- Ensure proper cleanup with `freeifaddrs` after both operations complete
+**REQ-1**: Single getifaddrs call per refresh operation
+- **Rationale**: Eliminate redundant system calls to improve performance
+- **Acceptance Criteria**:
+  - `refresh_networks_addresses` calls `getifaddrs` exactly once per invocation
+  - The retrieved interface address data is reused for all subsequent processing
+  - No behavioral changes to the returned network data
 
-**Constraints**:
-- Must work with existing `InterfaceAddress` wrapper from `network_helper.rs`
-- Must handle `getifaddrs` failure gracefully
-- Must maintain thread-safety if applicable
+**REQ-2**: Maintain existing API behavior
+- **Rationale**: Ensure backward compatibility and prevent breaking changes for existing users
+- **Acceptance Criteria**:
+  - All existing network tests continue to pass without modification
+  - Network interface list contents remain identical before and after optimization
+  - Network address information matches previous implementation output
+  - No changes to public API signatures or return types
 
-### FR-002: Refactor refresh_interfaces
-**Priority**: High  
-**Description**: Modify `refresh_interfaces()` to accept external `ifaddrs` data
+**REQ-3**: Proper memory management
+- **Rationale**: Ensure no memory leaks or unsafe code introduced by optimization
+- **Acceptance Criteria**:
+  - RAII wrapper properly manages `getifaddrs` result lifetime
+  - Memory is freed correctly when operation completes or fails
+  - No dangling pointers or use-after-free conditions
+  - Valgrind or similar memory checker reports no leaks
 
-**Details**:
-- Change signature to accept `&InterfaceAddress` or similar parameter
-- Remove internal `InterfaceAddressIterator::new()` call
-- Iterate over provided data instead of creating new iterator
-- Maintain all existing statistics collection logic
+**REQ-4**: Error handling preserved
+- **Rationale**: Maintain robust error handling for system call failures
+- **Acceptance Criteria**:
+  - Failed `getifaddrs` calls are handled gracefully
+  - Error conditions return same error types as before
+  - No panics or undefined behavior on system call failure
 
-**Constraints**:
-- Platform-specific (NetBSD-only change)
-- Must filter for `AF_LINK` addresses as before
-- Must skip loopback interfaces as before
+---
 
-### FR-003: Refactor refresh_networks_addresses
-**Priority**: High  
-**Description**: Ensure `refresh_networks_addresses()` uses shared `ifaddrs` data
+## Success Criteria
 
-**Details**:
-- If currently calls `getifaddrs` internally, remove that call
-- Accept the same shared data structure
-- Populate IP addresses and MAC addresses from shared data
-- Maintain existing address family handling (IPv4, IPv6)
+1. **System Call Reduction**: `getifaddrs` is invoked exactly once per `refresh_networks_addresses` call (measurable via strace/dtrace)
 
-**Constraints**:
-- Must work across all BSD variants if function is shared
-- Must handle missing data gracefully
+2. **Performance Improvement**: Network refresh operation completes measurably faster (benchmark shows >30% improvement in isolated refresh timing)
 
-### FR-004: Memory Management
-**Priority**: High  
-**Description**: Ensure single allocation/deallocation cycle
+3. **API Stability**: All existing network tests pass without modification (100% test compatibility)
 
-**Details**:
-- Allocate: One `getifaddrs` call in `refresh()`
-- Use: Both `refresh_interfaces()` and `refresh_networks_addresses()` iterate
-- Deallocate: One `freeifaddrs` call after both operations complete
-- Leverage existing RAII pattern in `InterfaceAddress` wrapper
+4. **Memory Safety**: No memory leaks detected by Valgrind/sanitizers (zero leaks, zero use-after-free)
 
-**Constraints**:
-- Must not leak memory on early returns
-- Must not double-free on error paths
-- Must handle null pointers safely
+5. **Platform Isolation**: Changes affect only NetBSD platform code (other platforms unchanged)
 
-## Non-Functional Requirements
+---
 
-### Performance
-- **Target**: 40-50% reduction in `refresh()` execution time
-- **Measurement**: Criterion benchmark comparing before/after
-- **Verification**: ktrace system call tracing on NetBSD
+## Key Entities
 
-### Compatibility
-- **API Stability**: No changes to public `NetworksInner` interface
-- **Binary Compatibility**: No changes to C FFI if applicable
-- **Platform**: NetBSD-specific change, other platforms unaffected
+**Entity 1: Interface Address List**
+- **Description**: Linked list of network interface addresses returned by `getifaddrs` system call
+- **Key Attributes**: Interface name, address family, IP address, netmask, broadcast address
+- **Relationships**: Single list contains all interfaces and all addresses for each interface
 
-### Testing
-- **Unit Tests**: All existing network tests must pass
-- **Integration Tests**: No modifications required to test suite
-- **System Tests**: Manual verification on NetBSD (10.x recommended)
+**Entity 2: RAII Wrapper**
+- **Description**: Rust wrapper type that manages the lifetime of the `getifaddrs` result pointer
+- **Key Attributes**: Raw pointer to interface address list, Drop implementation for cleanup
+- **Relationships**: Wraps the C-allocated linked list and ensures proper deallocation via `freeifaddrs`
 
-## Technical Constraints
+---
 
-### Platform Scope
-- **Affected**: NetBSD only (`src/unix/bsd/netbsd/network.rs`)
-- **Unaffected**: FreeBSD, Linux, macOS, Windows implementations
-- **Reason**: Other platforms may use different APIs or already optimize
+## Scope & Boundaries
 
-### Dependencies
-- **Required**: Existing `InterfaceAddress` wrapper from `src/unix/network_helper.rs`
-- **Assumption**: `InterfaceAddress` supports multiple iterations over same data
-- **Verification**: Check if `InterfaceAddress`'s iterator can be cloned/reset
+### In Scope
+- NetBSD `refresh_networks_addresses` implementation only
+- Single `getifaddrs` call optimization
+- RAII wrapper for memory safety
+- Existing test validation
 
-### Code Locations
-```
-src/unix/bsd/netbsd/network.rs
-  ├── NetworksInner::refresh()          [MODIFY: Add single getifaddrs call]
-  ├── NetworksInner::refresh_interfaces() [MODIFY: Accept external data]
-  └── InterfaceAddressIterator          [POSSIBLY MODIFY: Support external data]
+### Out of Scope
+- Other BSD platforms (FreeBSD - handled separately if needed)
+- Linux/macOS/Windows network implementations
+- Cross-refresh caching (future enhancement)
+- Network interface monitoring changes
+- Public API modifications
 
-src/network.rs
-  └── refresh_networks_addresses()      [VERIFY: Check if calls getifaddrs]
+---
 
-src/unix/network_helper.rs
-  └── InterfaceAddress                  [USE: RAII wrapper for getifaddrs]
-```
+## Constraints & Assumptions
 
-## Out of Scope
+### Constraints
+- Must maintain exact API compatibility (no breaking changes)
+- NetBSD-specific code paths only
+- Minimum Rust version 1.95 (project standard)
+- Must pass all existing network tests
 
-### Excluded from This Feature
-- ❌ Optimizations for other BSD variants (FreeBSD)
-- ❌ Changes to Linux/Windows/macOS implementations
-- ❌ Caching of network interface data across refreshes
-- ❌ Asynchronous or background refresh mechanisms
-- ❌ Changes to public API or method signatures
-- ❌ Performance optimization beyond getifaddrs reduction
+### Assumptions
+- `getifaddrs` returns consistent data within single call (interface list doesn't change during call)
+- RAII wrapper pattern is acceptable for FFI resource management
+- Existing `InterfaceAddress` wrapper or equivalent is available or can be created
+- Strace/dtrace/equivalent is available for validation on NetBSD
 
-### Future Considerations
-- Benchmark-driven optimization for other platforms
-- Differential updates (track only changed interfaces)
-- Configurable refresh rates based on change frequency
-
-## Assumptions
-
-1. **InterfaceAddress Design**: The existing `InterfaceAddress` wrapper in `network_helper.rs` uses RAII pattern with `Drop` trait for cleanup
-2. **Iterator Behavior**: The data returned by `getifaddrs` can be iterated multiple times or multiple iterators can work with same data
-3. **Thread Safety**: Network refresh operations are not called concurrently on the same `NetworksInner` instance
-4. **NetBSD Version**: Changes target modern NetBSD versions (9.x+) with stable libc API
-5. **Testing Access**: Developer has access to NetBSD system for testing and syscall tracing
+---
 
 ## Dependencies
 
-### Internal Dependencies
-- `src/unix/network_helper.rs::InterfaceAddress` - RAII wrapper for getifaddrs
-- `src/network.rs::refresh_networks_addresses()` - Shared network address population logic
-- `src/unix/bsd/netbsd/network.rs::InterfaceAddressIterator` - Current iterator implementation
-
 ### External Dependencies
-- NetBSD `libc::getifaddrs()` - System call to retrieve interface list
-- NetBSD `libc::freeifaddrs()` - Cleanup function for allocated data
-- Criterion crate - For performance benchmarking (dev dependency)
+- NetBSD libc `getifaddrs` and `freeifaddrs` functions
+- NetBSD system headers for interface address structures
 
-## Risks and Mitigations
+### Internal Dependencies
+- `src/unix/bsd/netbsd/network.rs` - Primary implementation file
+- `src/unix/network_helper.rs` - Existing RAII wrappers (if present)
+- `tests/network.rs` - Network test suite
+- Existing network refresh implementation patterns
 
-### Risk 1: InterfaceAddress Not Reusable
-**Probability**: Medium  
-**Impact**: High  
-**Description**: `InterfaceAddress` iterator might consume data or not support multiple iterations
+---
 
-**Mitigation**:
-- Inspect `InterfaceAddress` implementation before refactoring
-- If needed, create new iterator type that accepts external `*mut ifaddrs` pointer
-- Ensure new iterator doesn't own the data (no Drop implementation)
+## Risks & Mitigations
 
-### Risk 2: Shared Data Lifetime Issues
-**Probability**: Low  
-**Impact**: High  
-**Description**: Data might be freed before second operation completes
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Memory leak from improper RAII implementation | High | Low | Use existing proven RAII patterns, add Valgrind CI check |
+| Behavioral change breaking existing code | High | Low | Run full test suite, compare output with previous implementation |
+| Performance regression from wrapper overhead | Medium | Low | Benchmark before/after, wrapper should have zero overhead |
+| Platform-specific build failure | Medium | Medium | Test on actual NetBSD system, CI for NetBSD platform |
 
-**Mitigation**:
-- Use Rust borrowing to ensure data lives through both operations
-- Keep `InterfaceAddress` (RAII wrapper) alive until both functions complete
-- Add explicit lifetime annotations if needed
-
-### Risk 3: Platform-Specific Behavior Differences
-**Probability**: Low  
-**Impact**: Medium  
-**Description**: NetBSD `getifaddrs` might have subtleties that break with single-call approach
-
-**Mitigation**:
-- Test on multiple NetBSD versions (9.x, 10.x)
-- Use ktrace to verify system call behavior matches expectations
-- Review NetBSD man pages for `getifaddrs` guarantees
-
-### Risk 4: Test Coverage Gaps
-**Probability**: Medium  
-**Impact**: Medium  
-**Description**: Existing tests might not catch all edge cases in refactored code
-
-**Mitigation**:
-- Run full test suite on NetBSD platform (not just Linux CI)
-- Add ktrace-based system test to verify single syscall
-- Manual testing of various interface configurations (VLAN, bridge, tunnel, etc.)
+---
 
 ## Open Questions
 
-1. **Q**: Does `InterfaceAddress` from `network_helper.rs` support multiple iterations over the same data?  
-   **Action**: Review `InterfaceAddress` implementation and document iterator behavior
+*No clarifications needed - implementation path is clear based on existing codebase patterns and similar optimizations in other platforms.*
 
-2. **Q**: Does `refresh_networks_addresses()` in `src/network.rs` currently call `getifaddrs` for NetBSD?  
-   **Action**: Trace code path to confirm second call location
+---
 
-3. **Q**: Are there any MT-safety concerns with shared ifaddrs data across function calls?  
-   **Action**: Check if `refresh()` can be called concurrently, review locking
+## Appendix
 
-4. **Q**: What is the typical size of interface lists on NetBSD systems?  
-   **Action**: Test on typical systems (laptop: 2-5 interfaces, server: 10-20 interfaces)
+### References
+- Issue #1598: "unix::networks::refresh_networks_addresses is calling getifaddrs twice when it could call it only once"
+- NetBSD `getifaddrs(3)` man page
+- Existing RAII patterns in sysinfo codebase
+- Project Constitution: Principle 2 (Performance Optimization), Principle 3 (Memory Safety & RAII)
 
-5. **Q**: Should we add a benchmark specifically for this optimization?  
-   **Action**: Add `benches/network_refresh.rs` with before/after comparison
+### Glossary
+- **getifaddrs**: BSD/POSIX system call that retrieves network interface addresses as a linked list
+- **RAII**: Resource Acquisition Is Initialization - C++ pattern adopted in Rust for automatic resource cleanup
+- **FFI**: Foreign Function Interface - mechanism for calling C code from Rust
+- **System call**: Request from user space to kernel for privileged operation
+- **Context switch**: CPU switching from user mode to kernel mode (expensive operation)
 
-6. **Q**: Do we need to notify other BSD variant maintainers about this pattern?  
-   **Action**: Check if FreeBSD implementation has similar issue, document findings
+---
 
-## Acceptance Criteria
+**Document Control**
 
-### Functional Acceptance
-- [ ] **AC-F1**: `refresh()` calls `getifaddrs` exactly once (verified with ktrace)
-- [ ] **AC-F2**: All network interface statistics are correctly populated
-- [ ] **AC-F3**: MAC addresses are correctly retrieved for all interfaces
-- [ ] **AC-F4**: IPv4 and IPv6 addresses are correctly populated
-- [ ] **AC-F5**: Interface operational states are correctly determined
-- [ ] **AC-F6**: Removed interfaces are correctly pruned when flag is set
-
-### Technical Acceptance
-- [ ] **AC-T1**: All existing unit tests pass without modification
-- [ ] **AC-T2**: All existing integration tests pass without modification
-- [ ] **AC-T3**: Code compiles on NetBSD without warnings
-- [ ] **AC-T4**: No new clippy lints introduced
-- [ ] **AC-T5**: FIXME comment (lines 45-46) is removed
-
-### Performance Acceptance
-- [ ] **AC-P1**: `refresh()` execution time reduced by ≥40%
-- [ ] **AC-P2**: System call overhead reduced by 50% (proven via ktrace)
-- [ ] **AC-P3**: Memory allocations reduced (measurable in benchmark)
-- [ ] **AC-P4**: No performance regression on other BSD platforms
-
-### Documentation Acceptance
-- [ ] **AC-D1**: CHANGELOG.md updated with optimization note
-- [ ] **AC-D2**: Code comments explain single-call pattern
-- [ ] **AC-D3**: Implementation notes document InterfaceAddress usage
-- [ ] **AC-D4**: Benchmark results documented for reference
-
-## References
-
-- **Issue**: #1598 - getifaddrs called twice in NetBSD network refresh
-- **File**: `src/unix/bsd/netbsd/network.rs` (lines 45-47, FIXME comment)
-- **Man Pages**: 
-  - NetBSD `getifaddrs(3)` - https://man.netbsd.org/getifaddrs.3
-  - NetBSD `ifaddrs` structure - https://man.netbsd.org/getifaddrs.3#DESCRIPTION
-- **Related Code**:
-  - `src/unix/network_helper.rs::InterfaceAddress`
-  - `src/network.rs::refresh_networks_addresses()`
+| Version | Date | Author | Changes |
+|---------|------|--------|---------|
+| 1.0 | 2026-05-07 | Copilot | Initial specification based on Issue #1598 |
